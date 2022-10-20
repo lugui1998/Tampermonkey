@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         No Google Location
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      1.0
 // @description  Removes Google search footer with your location
 // @author       Lugui
 // @match        https://www.google.com/search?*
