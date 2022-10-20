@@ -4,7 +4,7 @@
 // @version      0.1
 // @description  Removes Google search footer with your location
 // @author       Lugui
-// @match        https://www.google.com/search?q=minecraft&oq=minecraft&aqs=chrome.0.69i59l5j69i61j69i60j69i61.1408j0j1&sourceid=chrome&ie=UTF-8
+// @match        https://www.google.com/search?
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
 // ==/UserScript==
