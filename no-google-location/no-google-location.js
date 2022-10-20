@@ -4,7 +4,7 @@
 // @version      0.1
 // @description  Removes Google search footer with your location
 // @author       Lugui
-// @match        https://www.google.com/search?
+// @match        https://www.google.com/search?*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
 // ==/UserScript==
