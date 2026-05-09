@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MercadoLivre URL Tracker Cleaner
-// @version      1.2.0
-// @description  Removes all MercadoLivre URL parameters except allowed product-detail parameters.
+// @version      1.2.1
+// @description  Removes all MercadoLivre URL trackers.
 // @author       Lugui
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=mercadolivre.com.br
 // @match        https://www.mercadolivre.com.br/*
@@ -28,37 +28,18 @@
   ];
 
   /**
-   * If true, hash fragments that look like query strings are cleaned too.
+   * Paths that must never be cleaned.
    *
-   * Examples cleaned:
-   * #tracking_id=abc&position=1
-   * #pdp_filters=something&tracking_id=abc
-   *
-   * Examples removed entirely:
-   * #tracking_id=abc
-   *
-   * Examples preserved:
-   * #reviews
-   * #description
+   * Login URLs may need redirect params, flow state, auth data, or other
+   * functional parameters. Touching them can break sign-in.
    */
+  const EXCLUDED_PATH_PREFIXES = [
+    "/login/"
+  ];
+
   const CLEAN_HASH_QUERY_PARAMS = true;
-
-  /**
-   * If true, the script redirects the current page to the cleaned URL.
-   *
-   * This cannot prevent the very first request from using the dirty URL,
-   * but it prevents the dirty URL from remaining in the address bar.
-   */
   const REDIRECT_CURRENT_PAGE = true;
-
-  /**
-   * If true, the script rewrites MercadoLivre links on the page.
-   */
   const CLEAN_PAGE_LINKS = true;
-
-  /**
-   * If true, the script also cleans URLs passed through SPA navigation.
-   */
   const CLEAN_HISTORY_NAVIGATION = true;
 
   const MERCADOLIVRE_HOSTS = new Set([
@@ -74,13 +55,20 @@
     return MERCADOLIVRE_HOSTS.has(url.hostname);
   }
 
+  function isExcludedUrl(url) {
+    return EXCLUDED_PATH_PREFIXES.some((pathPrefix) => {
+      return url.pathname.startsWith(pathPrefix);
+    });
+  }
+
   function isAllowedParamName(paramName) {
-    return ALLOWED_PARAM_PREFIXES.some((prefix) => paramName.startsWith(prefix));
+    return ALLOWED_PARAM_PREFIXES.some((prefix) => {
+      return paramName.startsWith(prefix);
+    });
   }
 
   function removeDisallowedParamsFromSearchParams(searchParams) {
     let changed = false;
-
     const paramsToDelete = [];
 
     for (const [paramName] of searchParams.entries()) {
@@ -150,6 +138,13 @@
     }
 
     if (!isMercadoLivreUrl(url)) {
+      return {
+        href: inputUrl,
+        changed: false
+      };
+    }
+
+    if (isExcludedUrl(url)) {
       return {
         href: inputUrl,
         changed: false
@@ -318,11 +313,6 @@
 
         anchor.href = result.href;
 
-        /**
-         * For normal left-click navigation, force the cleaned URL.
-         * Modified clicks like Ctrl+Click, Cmd+Click, middle-click, etc.
-         * are left alone after rewriting the href.
-         */
         if (
           event.button === 0 &&
           !event.ctrlKey &&
