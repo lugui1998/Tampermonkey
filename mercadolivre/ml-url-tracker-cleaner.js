@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MercadoLivre URL Tracker Cleaner
 // @version      1.2.1
-// @description  Removes all MercadoLivre URL trackers.
+// @description  Removes all MercadoLivre URL parameters except allowed product-detail parameters, while preserving login URLs.
 // @author       Lugui
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=mercadolivre.com.br
 // @match        https://www.mercadolivre.com.br/*
@@ -19,13 +19,8 @@
    * Remove every query parameter and every hash query parameter,
    * except parameters that are explicitly allowed.
    *
-   * MercadoLivre uses at least one useful product-detail parameter
-   * starting with "pdp_". That one is preserved because it can identify
-   * a specific seller/listing when multiple sellers share the same product page.
    */
-  const ALLOWED_PARAM_PREFIXES = [
-    "pdp_"
-  ];
+  const ALLOWED_PARAM_PREFIXES = [];
 
   /**
    * Paths that must never be cleaned.
