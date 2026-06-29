@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MercadoLivre URL Tracker Cleaner
-// @version      1.2.1
-// @description  Removes all MercadoLivre URL parameters except allowed product-detail parameters, while preserving login URLs.
+// @version      1.3.0
+// @description  Removes MercadoLivre tracking URL parameters without breaking login, reviews, modals, checkout, or internal flows.
 // @author       Lugui
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=mercadolivre.com.br
 // @match        https://www.mercadolivre.com.br/*
@@ -16,23 +16,94 @@
   "use strict";
 
   /**
-   * Remove every query parameter and every hash query parameter,
-   * except parameters that are explicitly allowed.
+   * Product-detail parameters that can affect the selected catalog offer,
+   * item, or variation. These are kept on product pages while other query
+   * parameters are removed.
    *
+   * Remove entries from this set if you want product URLs to be even cleaner.
    */
-  const ALLOWED_PARAM_PREFIXES = [];
+  const ALLOWED_PRODUCT_DETAIL_PARAM_NAMES = new Set([
+    "pdp_filters",
+    "item_id",
+    "variation",
+    "variation_id"
+  ]);
+
+  const ALLOWED_PRODUCT_DETAIL_PARAM_PREFIXES = [];
+
+  /**
+   * Known tracking parameters removed on non-product URLs.
+   * Product-detail URLs are cleaned more aggressively, except for the allowed
+   * product-detail parameters above.
+   */
+  const TRACKING_PARAM_NAMES = new Set([
+    "be_origin",
+    "fbclid",
+    "gclid",
+    "mc_eid",
+    "msclkid",
+    "oly_anon_id",
+    "oly_enc_id",
+    "polycard_client",
+    "sid",
+    "tracking_id",
+    "ua",
+    "utm_id",
+    "wid",
+    "yclid"
+  ]);
+
+  const TRACKING_PARAM_PREFIXES = [
+    "_ga",
+    "_gl",
+    "matt_",
+    "utm_"
+  ];
+
+  /**
+   * Hash params are sometimes tracking, but sometimes functional.
+   * Example of functional hash on MercadoLivre:
+   * #redirect=landing_international&origin=vip
+   *
+   * So, outside product-detail URLs, only known tracking hash params are removed.
+   */
+  const HASH_TRACKING_PARAM_NAMES = new Set([
+    "be_origin",
+    "origin",
+    "polycard_client",
+    "sid",
+    "tracking_id",
+    "wid"
+  ]);
+
+  const HASH_TRACKING_PARAM_PREFIXES = [
+    "utm_"
+  ];
 
   /**
    * Paths that must never be cleaned.
    *
-   * Login URLs may need redirect params, flow state, auth data, or other
-   * functional parameters. Touching them can break sign-in.
+   * These URLs often need query parameters for modals, reviews, checkout,
+   * login state, redirect targets, API flow state, or hydration data.
    */
   const EXCLUDED_PATH_PREFIXES = [
-    "/login/"
+    "/auth/",
+    "/authentication/",
+    "/cart/",
+    "/checkout/",
+    "/description",
+    "/gz/",
+    "/jms/",
+    "/login/",
+    "/noindex/",
+    "/p/api/",
+    "/questions",
+    "/registration/",
+    "/syi/"
   ];
 
   const CLEAN_HASH_QUERY_PARAMS = true;
+  const CLEAN_ALL_HASH_QUERY_PARAMS_ON_PRODUCT_DETAIL_URLS = true;
   const REDIRECT_CURRENT_PAGE = true;
   const CLEAN_PAGE_LINKS = true;
   const CLEAN_HISTORY_NAVIGATION = true;
@@ -52,35 +123,108 @@
 
   function isExcludedUrl(url) {
     return EXCLUDED_PATH_PREFIXES.some((pathPrefix) => {
-      return url.pathname.startsWith(pathPrefix);
+      return url.pathname === pathPrefix || url.pathname.startsWith(pathPrefix);
     });
   }
 
-  function isAllowedParamName(paramName) {
-    return ALLOWED_PARAM_PREFIXES.some((prefix) => {
-      return paramName.startsWith(prefix);
+  function isProductDetailUrl(url) {
+    if (url.hostname === "produto.mercadolivre.com.br") {
+      return /^\/MLB-\d+/i.test(url.pathname);
+    }
+
+    if (
+      url.hostname === "www.mercadolivre.com.br" ||
+      url.hostname === "mercadolivre.com.br"
+    ) {
+      return /\/p\/MLB\d+/i.test(url.pathname) || /^\/MLB-\d+/i.test(url.pathname);
+    }
+
+    return false;
+  }
+
+  function shouldCleanProductDetailUrlAggressively(url) {
+    return isProductDetailUrl(url) && !isExcludedUrl(url);
+  }
+
+  function normalizeParamName(paramName) {
+    return String(paramName).toLowerCase();
+  }
+
+  function isAllowedProductDetailParamName(paramName) {
+    const normalizedParamName = normalizeParamName(paramName);
+
+    if (ALLOWED_PRODUCT_DETAIL_PARAM_NAMES.has(normalizedParamName)) {
+      return true;
+    }
+
+    return ALLOWED_PRODUCT_DETAIL_PARAM_PREFIXES.some((prefix) => {
+      return normalizedParamName.startsWith(prefix.toLowerCase());
     });
   }
 
-  function removeDisallowedParamsFromSearchParams(searchParams) {
-    let changed = false;
-    const paramsToDelete = [];
+  function isTrackingParamName(paramName) {
+    const normalizedParamName = normalizeParamName(paramName);
+
+    if (TRACKING_PARAM_NAMES.has(normalizedParamName)) {
+      return true;
+    }
+
+    return TRACKING_PARAM_PREFIXES.some((prefix) => {
+      return normalizedParamName.startsWith(prefix.toLowerCase());
+    });
+  }
+
+  function isHashTrackingParamName(paramName) {
+    const normalizedParamName = normalizeParamName(paramName);
+
+    if (HASH_TRACKING_PARAM_NAMES.has(normalizedParamName)) {
+      return true;
+    }
+
+    return HASH_TRACKING_PARAM_PREFIXES.some((prefix) => {
+      return normalizedParamName.startsWith(prefix.toLowerCase());
+    });
+  }
+
+  function deleteParamsMatching(searchParams, shouldDeleteParamName) {
+    const paramsToDelete = new Set();
 
     for (const [paramName] of searchParams.entries()) {
-      if (!isAllowedParamName(paramName)) {
-        paramsToDelete.push(paramName);
+      if (shouldDeleteParamName(paramName)) {
+        paramsToDelete.add(paramName);
       }
     }
 
     for (const paramName of paramsToDelete) {
       searchParams.delete(paramName);
-      changed = true;
     }
 
-    return changed;
+    return paramsToDelete.size > 0;
   }
 
-  function cleanHash(hash) {
+  function removeDisallowedProductDetailParams(searchParams) {
+    return deleteParamsMatching(searchParams, (paramName) => {
+      return !isAllowedProductDetailParamName(paramName);
+    });
+  }
+
+  function removeKnownTrackingParams(searchParams) {
+    return deleteParamsMatching(searchParams, isTrackingParamName);
+  }
+
+  function removeKnownHashTrackingParams(searchParams) {
+    return deleteParamsMatching(searchParams, isHashTrackingParamName);
+  }
+
+  function isHashRouteLike(rawHash) {
+    return (
+      rawHash.startsWith("/") ||
+      rawHash.startsWith("!/") ||
+      rawHash.startsWith("!")
+    );
+  }
+
+  function cleanHash(hash, url) {
     if (!CLEAN_HASH_QUERY_PARAMS || !hash || hash.length <= 1) {
       return {
         hash,
@@ -94,6 +238,7 @@
      * Do not touch normal section hashes like:
      * #reviews
      * #description
+     * #topkeyword
      */
     if (!rawHash.includes("=")) {
       return {
@@ -102,8 +247,24 @@
       };
     }
 
+    /**
+     * Do not touch hash-based app routes.
+     */
+    if (isHashRouteLike(rawHash)) {
+      return {
+        hash,
+        changed: false
+      };
+    }
+
     const hashParams = new URLSearchParams(rawHash);
-    const changed = removeDisallowedParamsFromSearchParams(hashParams);
+    const shouldCleanAllHashParams =
+      CLEAN_ALL_HASH_QUERY_PARAMS_ON_PRODUCT_DETAIL_URLS &&
+      shouldCleanProductDetailUrlAggressively(url);
+
+    const changed = shouldCleanAllHashParams
+      ? deleteParamsMatching(hashParams, () => true)
+      : removeKnownHashTrackingParams(hashParams);
 
     if (!changed) {
       return {
@@ -118,6 +279,28 @@
       hash: cleanedHashString ? `#${cleanedHashString}` : "",
       changed: true
     };
+  }
+
+  function isRelativeUrl(value) {
+    return (
+      value.startsWith("/") ||
+      value.startsWith("./") ||
+      value.startsWith("../") ||
+      value.startsWith("?") ||
+      value.startsWith("#")
+    );
+  }
+
+  function buildPreservedRelativeHref(originalHref, cleanedUrl) {
+    if (originalHref.startsWith("#")) {
+      return cleanedUrl.hash || "#";
+    }
+
+    if (originalHref.startsWith("?")) {
+      return `${cleanedUrl.search}${cleanedUrl.hash}` || cleanedUrl.pathname;
+    }
+
+    return `${cleanedUrl.pathname}${cleanedUrl.search}${cleanedUrl.hash}`;
   }
 
   function cleanUrl(inputUrl, baseUrl = window.location.href, preserveRelative = false) {
@@ -148,11 +331,15 @@
 
     let changed = false;
 
-    if (removeDisallowedParamsFromSearchParams(url.searchParams)) {
+    if (shouldCleanProductDetailUrlAggressively(url)) {
+      if (removeDisallowedProductDetailParams(url.searchParams)) {
+        changed = true;
+      }
+    } else if (removeKnownTrackingParams(url.searchParams)) {
       changed = true;
     }
 
-    const cleanedHash = cleanHash(url.hash);
+    const cleanedHash = cleanHash(url.hash, url);
 
     if (cleanedHash.changed) {
       url.hash = cleanedHash.hash;
@@ -168,7 +355,7 @@
 
     if (preserveRelative && isRelativeUrl(inputUrl)) {
       return {
-        href: `${url.pathname}${url.search}${url.hash}`,
+        href: buildPreservedRelativeHref(inputUrl, url),
         changed: true
       };
     }
@@ -177,16 +364,6 @@
       href: url.toString(),
       changed: true
     };
-  }
-
-  function isRelativeUrl(value) {
-    return (
-      value.startsWith("/") ||
-      value.startsWith("./") ||
-      value.startsWith("../") ||
-      value.startsWith("?") ||
-      value.startsWith("#")
-    );
   }
 
   function cleanCurrentPageUrl() {
@@ -205,8 +382,25 @@
 
   function setAnchorHref(anchor, href) {
     isInternallyUpdatingHref = true;
-    anchor.setAttribute("href", href);
-    isInternallyUpdatingHref = false;
+
+    try {
+      anchor.setAttribute("href", href);
+    } finally {
+      isInternallyUpdatingHref = false;
+    }
+  }
+
+  function shouldSkipAnchorHref(originalHref) {
+    const normalizedHref = originalHref.trim().toLowerCase();
+
+    return (
+      !normalizedHref ||
+      normalizedHref.startsWith("javascript:") ||
+      normalizedHref.startsWith("mailto:") ||
+      normalizedHref.startsWith("tel:") ||
+      normalizedHref.startsWith("data:") ||
+      normalizedHref.startsWith("blob:")
+    );
   }
 
   function cleanAnchor(anchor) {
@@ -214,17 +408,13 @@
       return;
     }
 
-    const originalHref = anchor.getAttribute("href");
-
-    if (!originalHref) {
+    if (anchor.hasAttribute("download")) {
       return;
     }
 
-    if (
-      originalHref.startsWith("javascript:") ||
-      originalHref.startsWith("mailto:") ||
-      originalHref.startsWith("tel:")
-    ) {
+    const originalHref = anchor.getAttribute("href");
+
+    if (!originalHref || shouldSkipAnchorHref(originalHref)) {
       return;
     }
 
@@ -290,13 +480,38 @@
     });
   }
 
+  function getClosestAnchorFromEvent(event) {
+    if (!(event.target instanceof Element)) {
+      return null;
+    }
+
+    return event.target.closest("a[href]");
+  }
+
+  function isNormalLeftClickNavigation(event, anchor) {
+    return (
+      event.button === 0 &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.altKey &&
+      anchor.target !== "_blank"
+    );
+  }
+
   function interceptClicks() {
     document.addEventListener(
       "click",
       function (event) {
-        const anchor = event.target.closest?.("a[href]");
+        const anchor = getClosestAnchorFromEvent(event);
 
         if (!anchor) {
+          return;
+        }
+
+        const originalHref = anchor.getAttribute("href");
+
+        if (!originalHref || shouldSkipAnchorHref(originalHref)) {
           return;
         }
 
@@ -306,16 +521,9 @@
           return;
         }
 
-        anchor.href = result.href;
+        setAnchorHref(anchor, result.href);
 
-        if (
-          event.button === 0 &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.shiftKey &&
-          !event.altKey &&
-          anchor.target !== "_blank"
-        ) {
+        if (isNormalLeftClickNavigation(event, anchor)) {
           event.preventDefault();
           window.location.href = result.href;
         }
@@ -325,7 +533,7 @@
   }
 
   function cleanLinkBeforeUserUsesIt(event) {
-    const anchor = event.target.closest?.("a[href]");
+    const anchor = getClosestAnchorFromEvent(event);
 
     if (anchor) {
       cleanAnchor(anchor);
@@ -342,16 +550,19 @@
   function patchHistoryMethod(methodName) {
     const originalMethod = window.history[methodName];
 
-    window.history[methodName] = function (state, title, url) {
+    window.history[methodName] = function () {
+      const args = Array.from(arguments);
+      const url = args[2];
+
       if (typeof url === "string") {
         const result = cleanUrl(url, window.location.href, true);
 
         if (result.changed) {
-          url = result.href;
+          args[2] = result.href;
         }
       }
 
-      return originalMethod.call(this, state, title, url);
+      return originalMethod.apply(this, args);
     };
   }
 
@@ -369,15 +580,14 @@
     });
   }
 
-  cleanCurrentPageUrl();
-  cleanHistoryNavigation();
-
-  if (CLEAN_PAGE_LINKS) {
+  function startLinkCleaning() {
     interceptClicks();
     cleanLinksOnUserIntent();
 
     if (document.documentElement) {
       observeLinks();
+    } else {
+      document.addEventListener("DOMContentLoaded", observeLinks, { once: true });
     }
 
     if (document.readyState === "loading") {
@@ -387,5 +597,12 @@
     } else {
       cleanAllAnchors();
     }
+  }
+
+  cleanCurrentPageUrl();
+  cleanHistoryNavigation();
+
+  if (CLEAN_PAGE_LINKS) {
+    startLinkCleaning();
   }
 })();
