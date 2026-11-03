@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YouTube Auto Original Audio Selector
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.0.1
 // @description  Selects YouTube's original audio track directly, without opening menus.
 // @author       Lugui
 // @match        https://www.youtube.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
