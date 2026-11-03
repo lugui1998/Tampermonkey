@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Better share button.
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      2.0.1
 // @description  Share button copies a clean link.
 // @author       lugui
 // @match        https://www.youtube.com/*
@@ -14,221 +14,175 @@
     'use strict';
 
     const STORAGE_KEY = 'ytShareIncludeTime';
-    const getIncludeTime = () => (localStorage.getItem(STORAGE_KEY) ?? 'true') === 'true';
-    const setIncludeTime = (v) => localStorage.setItem(STORAGE_KEY, String(!!v));
+    const HIDDEN = 'data-better-share-hidden';
+    const GROUP = 'data-better-share-group';
+    const labels = new Set(['Share', 'Compartilhar', 'Compartir', 'Teilen', 'Partager', 'Condividi', 'Поделиться', '分享', '공유', '共有']);
+    const attached = new Map();
+    let scheduled = false;
 
-    function getVideoIdFromLocation() {
-        const u = new URL(location.href);
-        if (u.hostname.endsWith('youtube.com')) {
-            if (u.pathname === '/watch') return u.searchParams.get('v') || '';
-            if (u.pathname.startsWith('/shorts/')) return u.pathname.split('/shorts/')[1]?.split(/[/?#]/)[0] || '';
-            if (u.pathname.startsWith('/live/')) return u.pathname.split('/live/')[1]?.split(/[/?#]/)[0] || '';
+    let memoryIncludeTime = true;
+    try { memoryIncludeTime = (localStorage.getItem(STORAGE_KEY) ?? 'true') === 'true'; } catch { /* use memory */ }
+    const includeTime = () => memoryIncludeTime;
+    function setIncludeTime(value) {
+        memoryIncludeTime = value;
+        try { localStorage.setItem(STORAGE_KEY, String(value)); } catch { /* use memory */ }
+        updateToggles();
+    }
+    function updateToggles() {
+        for (const group of attached.values()) {
+            group.querySelector('.better-share-time')?.setAttribute('aria-pressed', String(includeTime()));
         }
-        return '';
+    }
+    window.addEventListener('storage', (event) => {
+        if (event.key !== STORAGE_KEY && event.key !== null) return;
+        memoryIncludeTime = event.newValue === null || event.newValue === 'true';
+        updateToggles();
+    });
+    function videoId() {
+        const url = new URL(location.href);
+        if (url.pathname === '/watch') return url.searchParams.get('v') || '';
+        const live = url.pathname.match(/^\/live\/([^/]+)\/?$/);
+        return live ? live[1] : '';
     }
 
-    function buildCleanUrl(includeTime) {
-        const vid = getVideoIdFromLocation();
-        const base = vid ? `https://youtu.be/${vid}` : location.origin + location.pathname;
-        let t = '';
-        if (includeTime) {
-            const video = document.querySelector('video');
-            if (video && !isNaN(video.currentTime)) t = Math.floor(video.currentTime).toString();
+    function cleanUrl(id) {
+        const url = new URL(`https://youtu.be/${encodeURIComponent(id)}`);
+        const player = document.querySelector('#movie_player');
+        if (includeTime() && player && !player.classList.contains('ad-showing')) {
+            // During SPA navigation the old player can remain briefly. Only use time
+            // when the player confirms it belongs to the URL's current video.
+            let playerId = '';
+            try { playerId = player.getVideoData?.()?.video_id || ''; } catch { /* not ready */ }
+            const video = player.querySelector('video');
+            if (playerId === id && video && Number.isFinite(video.currentTime) && video.currentTime >= 0) {
+                url.searchParams.set('t', String(Math.floor(video.currentTime)));
+            }
         }
-        return t ? `${base}?t=${encodeURIComponent(t)}` : base;
+        return url.href;
     }
 
-    async function copyToClipboard(text) {
+    async function copy(text) {
         try {
             await navigator.clipboard.writeText(text);
             return true;
         } catch {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.select();
+            const previousFocus = document.activeElement;
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            Object.assign(textarea.style, { position: 'fixed', left: '-9999px' });
+            document.body.appendChild(textarea);
+            textarea.select();
             let ok = false;
-            try { ok = document.execCommand('copy'); } catch { }
-            ta.remove();
+            try { ok = document.execCommand('copy'); } catch { /* report failure */ }
+            textarea.remove();
+            if (previousFocus?.isConnected) previousFocus.focus();
             return ok;
         }
     }
 
-    function showToast(msg) {
-        const t = document.createElement('div');
-        t.textContent = msg;
-        Object.assign(t.style, {
-            position: 'fixed',
-            zIndex: 2147483647,
-            bottom: '20px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            padding: '8px 12px',
-            background: 'rgba(0,0,0,0.85)',
-            color: '#fff',
-            borderRadius: '8px',
-            fontSize: '12px',
-            pointerEvents: 'none',
-            transition: 'opacity 0.2s',
-            opacity: '0',
+    function toast(message) {
+        const element = document.createElement('div');
+        element.setAttribute('role', 'status');
+        element.textContent = message;
+        Object.assign(element.style, {
+            position: 'fixed', zIndex: '2147483647', bottom: '20px', left: '50%',
+            transform: 'translateX(-50%)', padding: '8px 12px', background: 'rgba(0,0,0,.85)',
+            color: '#fff', borderRadius: '8px', fontSize: '12px', pointerEvents: 'none'
         });
-        document.body.appendChild(t);
-        requestAnimationFrame(() => (t.style.opacity = '1'));
-        setTimeout(() => {
-            t.style.opacity = '0';
-            setTimeout(() => t.remove(), 250);
-        }, 1400);
+        document.body.appendChild(element);
+        setTimeout(() => element.remove(), 1800);
     }
 
-    function isShareButton(el) {
-        if (!el) return false;
-        const s = ((el.getAttribute('aria-label') || '') + ' ' + (el.title || '') + ' ' + (el.textContent || '')).toLowerCase();
-        return /share|compartil|compartir|teilen|partager|condivid|подел|分享|공유|共有/.test(s);
-    }
-
-    function makeTimeToggle() {
-        const label = document.createElement('label');
-        label.setAttribute('data-yt-share-time', '1');
-        Object.assign(label.style, {
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            pointerEvents: 'auto',
-            position: 'relative',
-            zIndex: '1',
+    function makeGroup(label) {
+        const group = document.createElement('span');
+        group.setAttribute(GROUP, '');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', 'Share video');
+        group.lang = 'en';
+        group.dataset.betterShareOriginalLabel = label;
+        const share = document.createElement('button');
+        share.type = 'button';
+        share.className = 'better-share-copy';
+        share.setAttribute('aria-label', 'Share');
+        const arrow = document.createElement('span');
+        arrow.setAttribute('aria-hidden', 'true');
+        arrow.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M15 5v4C8 10 5 14 4 19c2.5-3.5 6-5 11-5v4l7-6.5z"/></svg>';
+        share.append(arrow, document.createTextNode('Share'));
+        share.addEventListener('click', async () => {
+            const id = videoId();
+            if (!id) { toast('Failed to copy'); return; }
+            const url = cleanUrl(id);
+            toast(await copy(url) ? 'Copied URL' : 'Failed to copy');
         });
 
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = getIncludeTime();
-        cb.style.margin = '0';
-        cb.style.verticalAlign = 'middle';
-
-        const txt = document.createElement('span');
-        txt.textContent = 'Share time';
-
-        const stop = (ev) => { ev.stopImmediatePropagation(); ev.stopPropagation(); };
-        for (const ev of ['pointerdown', 'pointerup', 'click', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown', 'keyup']) {
-            cb.addEventListener(ev, stop, true);
-            label.addEventListener(ev, stop, true);
-        }
-
-        cb.addEventListener('change', () => setIncludeTime(cb.checked), true);
-
-        label.appendChild(cb);
-        label.appendChild(txt);
-        return label;
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'better-share-time';
+        toggle.title = 'Toggle timestamp on share url';
+        toggle.setAttribute('aria-label', toggle.title);
+        toggle.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm-1 2v6.5l5 3 .9-1.5-4.1-2.4V6z"/></svg>';
+        const update = () => toggle.setAttribute('aria-pressed', String(includeTime()));
+        update();
+        toggle.addEventListener('click', () => {
+            setIncludeTime(!includeTime());
+            update();
+        });
+        group.append(share, toggle);
+        return group;
     }
 
-    function insertCheckboxInsideTextContainer(btn) {
-        if (btn.dataset.ytShareCheckboxAdded === '1') return;
+    const style = document.createElement('style');
+    style.textContent = `
+        [${HIDDEN}] { display: none !important; }
+        [${GROUP}] { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 36px; border-radius: 18px; overflow: hidden; background: var(--yt-spec-badge-chip-background, rgba(128,128,128,.2)); color: var(--yt-spec-text-primary, inherit); vertical-align: middle; margin-inline: 8px; }
+        [${GROUP}] button { border: 0; color: inherit; background: transparent; cursor: pointer; height: 36px; font: 500 14px Roboto, Arial, sans-serif; display: inline-flex; align-items: center; justify-content: center; }
+        [${GROUP}] button:hover { background: rgba(128,128,128,.2); }
+        [${GROUP}] button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+        [${GROUP}] .better-share-copy { gap: 6px; padding: 0 12px; }
+        [${GROUP}] .better-share-copy span { display: inline-flex; }
+        [${GROUP}] .better-share-time { padding: 0 11px; border-left: 1px solid rgba(128,128,128,.45); }
+        [${GROUP}] .better-share-time[aria-pressed="true"] { background: rgba(128,128,128,.28); box-shadow: inset 0 -3px currentColor; }
+    `;
+    document.head.appendChild(style);
 
-        const textContainer = btn.querySelector('.yt-spec-button-shape-next__button-text-content');
-        const target = textContainer || btn;
-
-        if (textContainer) {
-            textContainer.textContent = '';
-
-            textContainer.style.pointerEvents = 'auto';
-            textContainer.style.position = 'relative';
-            textContainer.style.zIndex = '1';
-        } else {
-            for (const old of btn.querySelectorAll('label[data-yt-share-time]')) old.remove();
-        }
-
-        const toggle = makeTimeToggle();
-        target.appendChild(toggle);
-
-        btn.dataset.ytShareCheckboxAdded = '1';
-    }
-
-    function attachToButton(host) {
-        if (!host || host.dataset.ytShareHook === '1') return;
-
-        const btn = host.matches('button') ? host : host.querySelector('button') || host;
-        if (!btn) return;
-        if (!isShareButton(btn) && !isShareButton(host)) return;
-
-        insertCheckboxInsideTextContainer(btn);
-
-        const swallowIfFromToggle = (e) => {
-            if (e.target && e.target.closest('[data-yt-share-time]')) {
-                e.stopImmediatePropagation();
-                e.stopPropagation();
+    function reconcile() {
+        scheduled = false;
+        const id = videoId();
+        for (const [host, group] of attached) {
+            const button = host.querySelector('button');
+            const label = button?.getAttribute('aria-label');
+            if (!id || !host.isConnected || !group.isConnected || group.parentElement !== host.parentElement || !host.parentElement?.getClientRects().length || !labels.has(label) || group.dataset.betterShareOriginalLabel !== label) {
+                host.removeAttribute(HIDDEN);
+                group.remove();
+                attached.delete(host);
             }
-        };
-        for (const ev of ['pointerdown', 'pointerup', 'click', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown', 'keyup']) {
-            btn.addEventListener(ev, swallowIfFromToggle, true);
         }
-
-        const handleShare = (e) => {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            e.stopPropagation();
-
-            const includeTime = getIncludeTime();
-            const url = buildCleanUrl(includeTime);
-            copyToClipboard(url).then((ok) => {
-                showToast(ok ? `Copied ${includeTime ? 'URL with time' : 'URL'}` : 'Failed to copy');
-            });
-        };
-        btn.addEventListener('click', handleShare, true);
-        btn.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') handleShare(e);
-        }, true);
-
-        host.dataset.ytShareHook = '1';
-    }
-
-    function scanAndAttach(root = document) {
-        const candidates = root.querySelectorAll([
-            'yt-button-view-model',
-            'button-view-model',
-            'ytd-button-renderer',
-            'ytd-menu-renderer ytd-button-renderer',
-            'button.yt-spec-button-shape-next',
-            'tp-yt-paper-button',
-            'button',
-            'a'
-        ].join(','));
-        for (const el of candidates) {
-            if (isShareButton(el) || isShareButton(el.parentElement) || el.matches('yt-button-view-model, button-view-model')) {
-                attachToButton(el);
+        if (!id) return;
+        const bars = document.querySelectorAll('ytd-watch-metadata #top-level-buttons-computed, ytd-video-primary-info-renderer #top-level-buttons-computed');
+        for (const bar of bars) {
+            if (!bar.getClientRects().length) continue;
+            for (const host of bar.children) {
+                if (host.hasAttribute(GROUP) || attached.has(host)) continue;
+                const button = host.querySelector('button');
+                const label = button?.getAttribute('aria-label');
+                if (!labels.has(label) || !button.getClientRects().length) continue;
+                const group = makeGroup(label);
+                host.setAttribute(HIDDEN, '');
+                host.after(group);
+                attached.set(host, group);
             }
         }
     }
-
-    const pageObserver = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            if (m.type === 'childList') {
-                for (const n of m.addedNodes) {
-                    if (n instanceof HTMLElement) scanAndAttach(n);
-                }
-            }
-            if (m.type === 'attributes' && m.target instanceof HTMLElement) {
-                if (m.attributeName === 'aria-label' || m.attributeName === 'title') {
-                    if (isShareButton(m.target)) attachToButton(m.target);
-                }
-            }
-        }
+    function schedule() {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(reconcile);
+    }
+    new MutationObserver(schedule).observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label']
     });
-
-    function start() {
-        scanAndAttach(document);
-        pageObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['aria-label', 'title']
-        });
-    }
-
-    if (document.body) start();
-    else {
-        new MutationObserver((_m, obs) => {
-            if (document.body) { obs.disconnect(); start(); }
-        }).observe(document.documentElement, { childList: true, subtree: true });
-    }
+    window.addEventListener('yt-navigate-finish', schedule);
+    window.addEventListener('popstate', schedule);
+    window.addEventListener('resize', schedule);
+    schedule();
 })();
